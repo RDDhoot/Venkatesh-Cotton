@@ -1,12 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import './App.css';
 import { db } from './firebaseConfig';
-import { collection, addDoc, onSnapshot, query, orderBy, limit, serverTimestamp, getDocs, doc, getDoc, updateDoc, where } from 'firebase/firestore';
+import { collection, addDoc, onSnapshot, query, orderBy, limit, serverTimestamp, getDocs, doc, getDoc, updateDoc, where, setDoc } from 'firebase/firestore';
 import * as XLSX from 'xlsx';
 
 function App() {
     // --- State for current entry being worked on ---
-    const [currentEntryId, setCurrentEntryId] = useState(null); // Firestore Document ID
+    const [currentEntryId, setCurrentEntryId] = useState(null); // Firestore Document ID (now Token No.)
     const [searchToken, setSearchToken] = useState(''); // For looking up an entry by token
     const [isNewEntry, setIsNewEntry] = useState(false); // Flag if we're creating new or editing existing
 
@@ -65,36 +65,30 @@ function App() {
         }
 
         try {
-            const q = query(collection(db, 'cottonEntries'), where('tokenNo', '==', searchToken));
-            const querySnapshot = await getDocs(q);
+            const entryRef = doc(db, 'cottonEntries', searchToken);
+            const entrySnap = await getDoc(entryRef);
 
-            if (querySnapshot.empty) {
+            if (entrySnap.exists()) {
+                const entryData = entrySnap.data();
+
+                setCurrentEntryId(searchToken); // Set ID to tokenNo
+                setIsNewEntry(false); // We are editing, not creating new
+                setBillingDate(entryData.billingDate || '');
+                setTokenNo(entryData.tokenNo || '');
+                setItemName(entryData.itemName || '');
+                setName(entryData.Name || '');
+                setVillage(entryData.Village || '');
+                setVehicleNo(entryData.vehicleNo || '');
+                setGrossWt(entryData.grossWt || '');
+                setTareWt(entryData.tareWt || '');
+                setRate(entryData.rate || '');
+                // Removed amountPaid setting
+            } else {
                 alert(`No entry found for Token No: ${searchToken}. You can create a new entry with this token.`);
                 resetForm();
                 setIsNewEntry(true);
                 setTokenNo(searchToken); // Pre-fill
-                return;
             }
-
-            if (querySnapshot.docs.length > 1) {
-                alert('Warning: Multiple entries found for this token. This should not happen. Loading the first one.');
-            }
-
-            const entryDoc = querySnapshot.docs[0];
-            const entryData = entryDoc.data();
-
-            setCurrentEntryId(entryDoc.id);
-            setIsNewEntry(false); // We are editing, not creating new
-            setBillingDate(entryData.billingDate || '');
-            setTokenNo(entryData.tokenNo || '');
-            setItemName(entryData.itemName || '');
-            setName(entryData.Name || '');
-            setVillage(entryData.Village || '');
-            setVehicleNo(entryData.vehicleNo || '');
-            setGrossWt(entryData.grossWt || '');
-            setTareWt(entryData.tareWt || '');
-            setRate(entryData.rate || '');
-            // Removed amountPaid setting
         } catch (error) {
             console.error("Error looking up entry: ", error);
             alert('Error looking up entry. Check console for details.');
@@ -151,13 +145,14 @@ function App() {
         };
 
         try {
+            const entryRef = doc(db, 'cottonEntries', tokenNo); // Use tokenNo as document ID
             if (currentEntryId) {
-                // Updating an existing entry
-                await updateDoc(doc(db, 'cottonEntries', currentEntryId), entryData);
+                // Updating an existing entry (currentEntryId should match tokenNo)
+                await updateDoc(entryRef, entryData);
                 alert('Entry updated successfully!');
             } else {
-                // Creating a new entry
-                await addDoc(collection(db, 'cottonEntries'), entryData);
+                // Creating a new entry with tokenNo as document ID
+                await setDoc(entryRef, entryData);
                 alert('New entry created successfully!');
             }
             resetForm();
