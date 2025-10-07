@@ -186,14 +186,15 @@ function App() {
 
         const wb = XLSX.utils.book_new();
         const headers = [
-            "Billing Date", "Token No.", "Item Name","Name","Village", "Vehicle No.", "Gross Wt", "Tare Wt",
-            "Net Wt", "Net Wt (Ded.)", "Hamali" // Added Hamali back as it's a deduction
+            "Billing Date", "Token No.", "Item Name","Name","Village", "Vehicle No.", "Gross Wt", "Tare Wt","Rate",
+            "Net Wt", "Net Wt (Ded.)", "Hamali","Gross Amount" // Added Hamali back as it's a deduction
         ];
 
         const summaryData = allEntries.map(entry => [
             entry.billingDate, entry.tokenNo, entry.itemName,entry.Name,entry.Village, entry.vehicleNo,
             entry.grossWt, (entry.tareWt !== null ? entry.tareWt : ''),
-            entry.netWt, entry.netWtAfterDeduction, (entry.hamaliDeduction !== null ? entry.hamaliDeduction : '')
+            entry.netWt, entry.netWtAfterDeduction, (entry.hamaliDeduction !== null ? entry.hamaliDeduction : ''),
+            entry.rate, (entry.rate && entry.netWtAfterDeduction ? (entry.rate * entry.netWtAfterDeduction).toFixed(2) : '')
         ]);
         const summaryWs = XLSX.utils.aoa_to_sheet([headers, ...summaryData]);
         XLSX.utils.book_append_sheet(wb, summaryWs, "All Entries Summary");
@@ -212,7 +213,8 @@ function App() {
             const sheetData = itemEntries.map(entry => [
                 entry.billingDate, entry.tokenNo, entry.itemName,entry.Name,entry.Village, entry.vehicleNo,
                 entry.grossWt, (entry.tareWt !== null ? entry.tareWt : ''),
-                entry.netWt, entry.netWtAfterDeduction, (entry.hamaliDeduction !== null ? entry.hamaliDeduction : '')
+                entry.netWt, entry.netWtAfterDeduction, (entry.hamaliDeduction !== null ? entry.hamaliDeduction : ''),
+                entry.rate, (entry.rate && entry.netWtAfterDeduction ? (entry.rate * entry.netWtAfterDeduction).toFixed(2) : '')
             ]);
             const ws = XLSX.utils.aoa_to_sheet([headers, ...sheetData]);
             const safeItemName = itemName.replace(/[\\/?*[\]:; ]/g, '_').substring(0, 31);
@@ -311,7 +313,9 @@ function App() {
                             <th>Tare Wt</th>
                             <th>Net Wt</th>
                             <th>Net Wt (Ded.)</th>
-                            <th>Hamali</th> {/* Keeping Hamali in table for derived value visibility */}
+                            <th>Hamali</th> 
+                            <th>Rate</th>
+                            <th>Gross Amount</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -328,6 +332,8 @@ function App() {
                                 <td>{entry.netWt || 'N/A'}</td>
                                 <td>{entry.netWtAfterDeduction || 'N/A'}</td>
                                 <td>{entry.hamaliDeduction || 'N/A'}</td>
+                                <td>{entry.rate || 'N/A'}</td>
+                                <td>{entry.rate && entry.netWtAfterDeduction ? (entry.rate * entry.netWtAfterDeduction).toFixed(2) : 'N/A'}</td>
                             </tr>
                         ))}
                     </tbody>
