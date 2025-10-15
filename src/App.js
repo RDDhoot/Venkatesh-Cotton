@@ -4,6 +4,10 @@ import { db } from './firebaseConfig';
 import { collection, addDoc, onSnapshot, query, orderBy, limit, serverTimestamp, getDocs, doc, getDoc, updateDoc, where, setDoc } from 'firebase/firestore';
 import * as XLSX from 'xlsx';
 
+// PDF generation imports
+import jsPDF from 'jspdf';
+import html2canvas from 'html2canvas';
+
 function App() {
     // --- State for current entry being worked on ---
     const [currentEntryId, setCurrentEntryId] = useState(null); // Firestore Document ID (now Token No.)
@@ -113,17 +117,28 @@ function App() {
         const parsedGrossWt = parseFloat(grossWt || 0);
         const parsedTareWt = parseFloat(tareWt || 0);
         const parsedRate = parseFloat(rate || 0);
-        // Removed parsedAmountPaid
 
-        // Calculations - ensure all required values are present before calculating
-        let netWt = 0, netWtAfterDeduction = 0, hamaliDeduction = 0; // Removed other calculations
-        const weighmentCharges = 50; // Still a constant if needed for other places, but not in output
+        // Calculations
+        let netWt = 0;
+        let netWtAfterDeduction = 0;
+        let hamaliDeduction = 0;
+        let grossAmount = 0; // Will be calculated if rate and netWtAfterDeduction are available
+        let netAmount = 0; // New calculation
 
-        if (parsedGrossWt && parsedTareWt) { // Only calculate if gross and tare are available
+        const weighmentCharges = 50; // Constant for weighment charges
+
+        if (parsedGrossWt && parsedTareWt) {
             netWt = parsedGrossWt - parsedTareWt;
             netWtAfterDeduction = netWt * 0.986;
             hamaliDeduction = netWt * 15;
         }
+
+        if (parsedRate && netWtAfterDeduction) {
+            grossAmount = parsedRate * netWtAfterDeduction;
+            // Calculate Net Amount: Gross Amount - Hamali - Weighment Charges (50)
+            netAmount = grossAmount - hamaliDeduction - weighmentCharges;
+        }
+
 
         const entryData = {
             billingDate: billingDate || null,
@@ -135,23 +150,21 @@ function App() {
             grossWt: parsedGrossWt || null,
             tareWt: parsedTareWt || null,
             rate: parsedRate || null,
-            // Removed amountPaid
             netWt: parseFloat(netWt.toFixed(2)) || null,
             netWtAfterDeduction: parseFloat(netWtAfterDeduction.toFixed(2)) || null,
             hamaliDeduction: parseFloat(hamaliDeduction.toFixed(2)) || null,
-            // Removed other calculated fields
+            grossAmount: parseFloat(grossAmount.toFixed(2)) || null, // Storing gross amount
+            netAmount: parseFloat(netAmount.toFixed(2)) || null, // Storing net amount
             timestamp: serverTimestamp(),
-            lastUpdatedBy: 'Current User' // You can add user authentication here later
+            lastUpdatedBy: 'Current User' 
         };
 
         try {
-            const entryRef = doc(db, 'cottonEntries', tokenNo); // Use tokenNo as document ID
+            const entryRef = doc(db, 'cottonEntries', tokenNo);
             if (currentEntryId) {
-                // Updating an existing entry (currentEntryId should match tokenNo)
                 await updateDoc(entryRef, entryData);
                 alert('Entry updated successfully!');
             } else {
-                // Creating a new entry with tokenNo as document ID
                 await setDoc(entryRef, entryData);
                 alert('New entry created successfully!');
             }
@@ -181,15 +194,16 @@ function App() {
 
         const wb = XLSX.utils.book_new();
         const headers = [
-            "Billing Date", "Token No.", "Item Name","Name","Village", "Vehicle No.", "Gross Wt", "Tare Wt","Rate",
-            "Net Wt", "Net Wt (Ded.)", "Hamali","Gross Amount" // Added Hamali back as it's a deduction
+            "Billing Date", "Token No.", "Item Name","Name","Village", "Vehicle No.", "Gross Wt", "Tare Wt",
+            "Net Wt", "Net Wt (Ded.)", "Hamali", "Rate", "Gross Amount", "Net Amount" // Added Net Amount
         ];
 
         const summaryData = allEntries.map(entry => [
             entry.billingDate, entry.tokenNo, entry.itemName,entry.Name,entry.Village, entry.vehicleNo,
             entry.grossWt, (entry.tareWt !== null ? entry.tareWt : ''),
             entry.netWt, entry.netWtAfterDeduction, (entry.hamaliDeduction !== null ? entry.hamaliDeduction : ''),
-            entry.rate, (entry.rate && entry.netWtAfterDeduction ? (entry.rate * entry.netWtAfterDeduction).toFixed(2) : '')
+            entry.rate, (entry.rate && entry.netWtAfterDeduction ? (entry.rate * entry.netWtAfterDeduction).toFixed(2) : ''), // Gross Amount
+            (entry.grossAmount !== null && entry.hamaliDeduction !== null ? (entry.grossAmount - entry.hamaliDeduction - 50).toFixed(2) : '') // Net Amount calculation for export
         ]);
         const summaryWs = XLSX.utils.aoa_to_sheet([headers, ...summaryData]);
         XLSX.utils.book_append_sheet(wb, summaryWs, "All Entries Summary");
@@ -209,7 +223,8 @@ function App() {
                 entry.billingDate, entry.tokenNo, entry.itemName,entry.Name,entry.Village, entry.vehicleNo,
                 entry.grossWt, (entry.tareWt !== null ? entry.tareWt : ''),
                 entry.netWt, entry.netWtAfterDeduction, (entry.hamaliDeduction !== null ? entry.hamaliDeduction : ''),
-                entry.rate, (entry.rate && entry.netWtAfterDeduction ? (entry.rate * entry.netWtAfterDeduction).toFixed(2) : '')
+                entry.rate, (entry.rate && entry.netWtAfterDeduction ? (entry.rate * entry.netWtAfterDeduction).toFixed(2) : ''), // Gross Amount
+                (entry.grossAmount !== null && entry.hamaliDeduction !== null ? (entry.grossAmount - entry.hamaliDeduction - 50).toFixed(2) : '') // Net Amount calculation for export
             ]);
             const ws = XLSX.utils.aoa_to_sheet([headers, ...sheetData]);
             const safeItemName = itemName.replace(/[\\/?*[\]:; ]/g, '_').substring(0, 31);
@@ -217,6 +232,277 @@ function App() {
         }
         XLSX.writeFile(wb, "VCC_Cotton_Entries.xlsx");
         alert('Export initiated. Check your downloads.');
+    };
+
+    // --- PDF Generation Function (now accepts entry data) ---
+    const generatePdf = async (entryToPrint) => {
+        if (!entryToPrint || !entryToPrint.tokenNo) {
+            alert('Cannot generate PDF: invalid entry data.');
+            return;
+        }
+
+        // Calculations for PDF display
+        const parsedGrossWt = parseFloat(entryToPrint.grossWt || 0);
+        const parsedTareWt = parseFloat(entryToPrint.tareWt || 0);
+        const parsedRate = parseFloat(entryToPrint.rate || 0);
+
+        let netWt = parsedGrossWt && parsedTareWt ? parsedGrossWt - parsedTareWt : 0;
+        let netWtAfterDeduction = netWt * 0.986;
+        let hamaliDeduction = netWt * 15;
+        const weighmentCharges = 50;
+
+        let grossAmount = parsedRate && netWtAfterDeduction ? parsedRate * netWtAfterDeduction : 0;
+        let netAmount = grossAmount - hamaliDeduction - weighmentCharges;
+
+        // Create a temporary element to render the PDF content
+        const pdfContentElement = document.createElement('div');
+        pdfContentElement.style.width = '210mm'; // A4 width
+        pdfContentElement.style.padding = '10mm';
+        pdfContentElement.style.boxSizing = 'border-box';
+        pdfContentElement.innerHTML = `
+            <style>
+                .pdf-bill-container {
+                    font-family: Arial, sans-serif;
+                    border: 1px solid #000;
+                    padding: 10px;
+                    margin-bottom: 20px;
+                }
+                .pdf-header {
+                    text-align: center;
+                    font-weight: bold;
+                    margin-bottom: 15px;
+                }
+                .pdf-row {
+                    display: flex;
+                    margin-bottom: 5px;
+                }
+                .pdf-col-left {
+                    width: 30%;
+                    font-weight: bold;
+                }
+                .pdf-col-right {
+                    width: 70%;
+                }
+                .pdf-field-box {
+                    border: 1px solid #000;
+                    padding: 2px 5px;
+                    min-height: 20px;
+                    display: flex;
+                    align-items: center;
+                    box-sizing: border-box; /* Ensure padding is inside the width */
+                }
+                .pdf-grid {
+                    display: grid;
+                    grid-template-columns: 1fr 1fr;
+                    gap: 10px;
+                    margin-top: 10px;
+                }
+                .pdf-grid-item {
+                    display: flex;
+                    flex-direction: column;
+                }
+                .pdf-sub-header {
+                    font-weight: bold;
+                    margin-top: 10px;
+                    margin-bottom: 5px;
+                }
+                .pdf-full-width-box {
+                    border: 1px solid #000;
+                    padding: 5px;
+                    margin-top: 5px;
+                    min-height: 30px;
+                    display: flex;
+                    align-items: center;
+                    box-sizing: border-box; /* Ensure padding is inside the width */
+                }
+                .align-right {
+                    text-align: right;
+                }
+                /* Specific styles to match the image more closely */
+                .pdf-field-line {
+                    display: flex;
+                    align-items: center;
+                    margin-bottom: 5px;
+                }
+                .pdf-field-label {
+                    font-weight: bold;
+                    margin-right: 5px;
+                    white-space: nowrap; /* Prevent label from wrapping */
+                }
+                .pdf-section-spacing {
+                    margin-top: 15px;
+                }
+                .pdf-grid-half-width {
+                    width: calc(50% - 5px); /* Adjusted for gap */
+                }
+                .pdf-grid-full-width {
+                    width: 100%;
+                }
+                .pdf-small-box {
+                    width: 80px; /* Specific width for apmc copy */
+                    text-align: center;
+                    font-size: 0.8em;
+                }
+                .pdf-large-field {
+                    min-height: 25px;
+                }
+            </style>
+            <div class="pdf-bill-container">
+                <div class="pdf-header">FARMER PURCHASE BILL</div>
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px;">
+                    <div class="pdf-field-line">
+                        <span class="pdf-field-label">Token No. :</span>
+                        <div class="pdf-field-box pdf-large-field" style="width: 120px;">${entryToPrint.tokenNo || ''}</div>
+                    </div>
+                    <div class="pdf-field-line">
+                        <span class="pdf-field-label">Date :</span>
+                        <div class="pdf-field-box pdf-large-field" style="width: 150px;">${entryToPrint.billingDate || ''}</div>
+                    </div>
+                    <div class="pdf-field-box pdf-small-box">apmc Copy</div>
+                </div>
+
+                <div class="pdf-field-line pdf-section-spacing">
+                    <span class="pdf-field-label">Farmer Name:</span>
+                    <div class="pdf-full-width-box pdf-large-field" style="flex-grow: 1;">${entryToPrint.Name || ''}</div>
+                </div>
+
+                <div class="pdf-grid pdf-section-spacing">
+                    <div class="pdf-grid-item">
+                        <span class="pdf-field-label">Village:</span>
+                        <div class="pdf-field-box pdf-large-field">${entryToPrint.Village || ''}</div>
+                    </div>
+                    <div class="pdf-grid-item">
+                        <span class="pdf-field-label">gross wt:</span>
+                        <div class="pdf-field-box pdf-large-field">${parsedGrossWt.toFixed(2)}</div>
+                    </div>
+                    <div class="pdf-grid-item">
+                        <span class="pdf-field-label">Vehicle No.:</span>
+                        <div class="pdf-field-box pdf-large-field">${entryToPrint.vehicleNo || ''}</div>
+                    </div>
+                    <div class="pdf-grid-item">
+                        <span class="pdf-field-label">Tare Wt:</span>
+                        <div class="pdf-field-box pdf-large-field">${parsedTareWt.toFixed(2)}</div>
+                    </div>
+                    <div class="pdf-grid-item">
+                        <span class="pdf-field-label">Rate:</span>
+                        <div class="pdf-full-width-box pdf-large-field" style="flex-grow: 1;">${parsedRate.toFixed(2)}</div>
+                    </div>
+                    <div class="pdf-grid-item">
+                        <span class="pdf-field-label">Net Wt:</span>
+                        <div class="pdf-field-box pdf-large-field">${netWt.toFixed(2)}</div>
+                    </div>
+                    <div class="pdf-grid-item">
+                        <span class="pdf-field-label">Deductions (Hamali + 50) :</span>
+                        <div class="pdf-full-width-box pdf-large-field" style="flex-grow: 1;">${hamaliDeduction.toFixed(2)} + 50</div>
+                    </div>
+                    <div class="pdf-grid-item">
+                        <span class="pdf-field-label">Net Wt after Deductions:</span>
+                        <div class="pdf-field-box pdf-large-field">(Net wt * 0.986) ${netWtAfterDeduction.toFixed(2)}</div>
+                    </div>
+                    <div class="pdf-grid-item" style="grid-column: 2 / 3;">
+                        <span class="pdf-field-label">Net Amount:</span>
+                        <div class="pdf-full-width-box pdf-large-field" style="font-size: 1.2em; text-align: right; flex-grow: 1;">${netAmount.toFixed(2)}</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="pdf-bill-container" style="margin-top: 20px;">
+                <div class="pdf-header">FARMER PURCHASE BILL</div>
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px;">
+                    <div class="pdf-field-line">
+                        <span class="pdf-field-label">Token No. :</span>
+                        <div class="pdf-field-box pdf-large-field" style="width: 120px;">${entryToPrint.tokenNo || ''}</div>
+                    </div>
+                    <div class="pdf-field-line">
+                        <span class="pdf-field-label">Date :</span>
+                        <div class="pdf-field-box pdf-large-field" style="width: 150px;">${entryToPrint.billingDate || ''}</div>
+                    </div>
+                    <div class="pdf-field-box pdf-small-box">FarmerCopy</div>
+                </div>
+
+                <div class="pdf-field-line pdf-section-spacing">
+                    <span class="pdf-field-label">Farmer Name:</span>
+                    <div class="pdf-full-width-box pdf-large-field" style="flex-grow: 1;">${entryToPrint.Name || ''}</div>
+                </div>
+
+                <div class="pdf-grid pdf-section-spacing">
+                    <div class="pdf-grid-item">
+                        <span class="pdf-field-label">Village:</span>
+                        <div class="pdf-field-box pdf-large-field">${entryToPrint.Village || ''}</div>
+                    </div>
+                    <div class="pdf-grid-item">
+                        <span class="pdf-field-label">gross wt:</span>
+                        <div class="pdf-field-box pdf-large-field">${parsedGrossWt.toFixed(2)}</div>
+                    </div>
+                    <div class="pdf-grid-item">
+                        <span class="pdf-field-label">Vehicle No.:</span>
+                        <div class="pdf-field-box pdf-large-field">${entryToPrint.vehicleNo || ''}</div>
+                    </div>
+                    <div class="pdf-grid-item">
+                        <span class="pdf-field-label">Tare Wt:</span>
+                        <div class="pdf-field-box pdf-large-field">${parsedTareWt.toFixed(2)}</div>
+                    </div>
+                    <div class="pdf-grid-item">
+                        <span class="pdf-field-label">Rate:</span>
+                        <div class="pdf-full-width-box pdf-large-field" style="flex-grow: 1;">${parsedRate.toFixed(2)}</div>
+                    </div>
+                    <div class="pdf-grid-item">
+                        <span class="pdf-field-label">Net Wt:</span>
+                        <div class="pdf-field-box pdf-large-field">${netWt.toFixed(2)}</div>
+                    </div>
+                    <div class="pdf-grid-item">
+                        <span class="pdf-field-label">Deductions (Hamali + 50) :</span>
+                        <div class="pdf-full-width-box pdf-large-field" style="flex-grow: 1;">${hamaliDeduction.toFixed(2)} + 50</div>
+                    </div>
+                    <div class="pdf-grid-item">
+                        <span class="pdf-field-label">Net Wt after Deductions:</span>
+                        <div class="pdf-field-box pdf-large-field">(Net wt * 0.986) ${netWtAfterDeduction.toFixed(2)}</div>
+                    </div>
+                    <div class="pdf-grid-item" style="grid-column: 2 / 3;">
+                        <span class="pdf-field-label">Net Amount:</span>
+                        <div class="pdf-full-width-box pdf-large-field" style="font-size: 1.2em; text-align: right; flex-grow: 1;">${netAmount.toFixed(2)}</div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(pdfContentElement); // Temporarily append to body for html2canvas
+
+        try {
+            const canvas = await html2canvas(pdfContentElement, {
+                scale: 2, // Increase scale for better resolution
+                useCORS: true, // Important if you have images from different origins
+                windowWidth: pdfContentElement.scrollWidth,
+                windowHeight: pdfContentElement.scrollHeight
+            });
+
+            const imgData = canvas.toDataURL('image/png');
+            const pdf = new jsPDF('p', 'mm', 'a4'); // 'p' for portrait, 'mm' for millimeters, 'a4' for A4 size
+
+            const imgWidth = 210; // A4 width in mm
+            const pageHeight = 297; // A4 height in mm
+            const imgHeight = canvas.height * imgWidth / canvas.width;
+            let heightLeft = imgHeight;
+            let position = 0;
+
+            pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+            heightLeft -= pageHeight;
+
+            while (heightLeft >= 0) {
+                position = heightLeft - imgHeight;
+                pdf.addPage();
+                pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+                heightLeft -= pageHeight;
+            }
+
+            pdf.save(`Farmer_Purchase_Bill_${entryToPrint.tokenNo}.pdf`);
+            alert('PDF generated successfully!');
+        } catch (error) {
+            console.error("Error generating PDF: ", error);
+            alert('Failed to generate PDF. Check console for details.');
+        } finally {
+            document.body.removeChild(pdfContentElement); // Clean up the temporary element
+        }
     };
 
 
@@ -286,6 +572,7 @@ function App() {
 
                             <button type="submit">Save/Update Entry</button>
                             <button type="button" onClick={resetForm}>Cancel/New Search</button>
+                            {/* The PDF button here is removed as it's now per-entry in the table */}
                         </form>
                     </div>
                 )}
@@ -311,26 +598,44 @@ function App() {
                             <th>Hamali</th> 
                             <th>Rate</th>
                             <th>Gross Amount</th>
+                            <th>Net Amount</th>
+                            <th>Actions</th> {/* Added new header for the PDF button */}
                         </tr>
                     </thead>
                     <tbody>
-                        {recentEntries.map(entry => (
-                            <tr key={entry.id}>
-                                <td>{entry.billingDate || 'N/A'}</td>
-                                <td>{entry.tokenNo || 'N/A'}</td>
-                                <td>{entry.itemName || 'N/A'}</td>
-                                <td>{entry.Name || 'N/A'}</td>
-                                <td>{entry.Village || 'N/A'}</td>
-                                <td>{entry.vehicleNo || 'N/A'}</td>
-                                <td>{entry.grossWt || 'N/A'}</td>
-                                <td>{entry.tareWt || 'N/A'}</td>
-                                <td>{entry.netWt || 'N/A'}</td>
-                                <td>{entry.netWtAfterDeduction || 'N/A'}</td>
-                                <td>{entry.hamaliDeduction || 'N/A'}</td>
-                                <td>{entry.rate || 'N/A'}</td>
-                                <td>{entry.rate && entry.netWtAfterDeduction ? (entry.rate * entry.netWtAfterDeduction).toFixed(2) : 'N/A'}</td>
-                            </tr>
-                        ))}
+                        {recentEntries.map(entry => {
+                            // Recalculate Gross Amount and Net Amount for display
+                            const currentGrossAmount = entry.rate && entry.netWtAfterDeduction ? (entry.rate * entry.netWtAfterDeduction) : 0;
+                            const currentHamali = entry.hamaliDeduction || 0;
+                            const currentNetAmount = currentGrossAmount > 0 ? (currentGrossAmount - currentHamali - 50) : 0; // - 50 for weighment charges
+
+                            return (
+                                <tr key={entry.id}>
+                                    <td>{entry.billingDate || 'N/A'}</td>
+                                    <td>{entry.tokenNo || 'N/A'}</td>
+                                    <td>{entry.itemName || 'N/A'}</td>
+                                    <td>{entry.Name || 'N/A'}</td>
+                                    <td>{entry.Village || 'N/A'}</td>
+                                    <td>{entry.vehicleNo || 'N/A'}</td>
+                                    <td>{entry.grossWt || 'N/A'}</td>
+                                    <td>{entry.tareWt || 'N/A'}</td>
+                                    <td>{entry.netWt || 'N/A'}</td>
+                                    <td>{entry.netWtAfterDeduction ? entry.netWtAfterDeduction.toFixed(2) : 'N/A'}</td>
+                                    <td>{entry.hamaliDeduction ? entry.hamaliDeduction.toFixed(2) : 'N/A'}</td>
+                                    <td>{entry.rate || 'N/A'}</td>
+                                    <td>{currentGrossAmount ? currentGrossAmount.toFixed(2) : 'N/A'}</td>
+                                    <td>{currentNetAmount ? currentNetAmount.toFixed(2) : 'N/A'}</td>
+                                    <td>
+                                        <button 
+                                            onClick={() => generatePdf(entry)} // Pass the individual entry to the function
+                                            style={{ backgroundColor: '#e74c3c', color: 'white', border: 'none', padding: '5px 10px', cursor: 'pointer', borderRadius: '3px' }}
+                                        >
+                                            Download PDF
+                                        </button>
+                                    </td>
+                                </tr>
+                            );
+                        })}
                     </tbody>
                 </table>
             </div>
